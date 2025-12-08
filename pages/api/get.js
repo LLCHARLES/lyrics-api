@@ -1,5 +1,6 @@
 import axios from 'axios';
-
+import crypto from 'crypto';
+import zlib from 'zlib';
 // 歌曲映射表 - 直接映射到对应的MID
 const songMapping = {
   // 格式: '歌名_艺人': 'MID'
@@ -990,14 +991,12 @@ function tripleDesDecrypt(inputBytes) {
   console.log('[逐字歌词] 开始TripleDES解密...');
   
   try {
-    const crypto = require('crypto');
-    
     // QQ音乐密钥
     const keyStr = '!@#)(*$%123ZXC!@!@#)(NHL';
     console.log(`[逐字歌词] 原始密钥字符串: ${keyStr}, 长度: ${keyStr.length}`);
     
     // 将密钥字符串转换为Buffer
-    const key = Buffer.from(keyStr, 'ascii');
+    let key = Buffer.from(keyStr, 'ascii');
     console.log(`[逐字歌词] 密钥Buffer长度: ${key.length}`);
     
     // 检查密钥长度，TripleDES需要24字节密钥
@@ -1041,8 +1040,6 @@ function decompressData(compressedData) {
   console.log('[逐字歌词] 开始解压缩...');
   
   try {
-    const zlib = require('zlib');
-    
     console.log(`[逐字歌词] 压缩数据长度: ${compressedData.length}`);
     
     // 尝试inflate解压缩
