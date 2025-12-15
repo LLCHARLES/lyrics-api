@@ -57,7 +57,7 @@ export default async function handler(req, res) {
     const processedArtists = preprocessArtists(finalArtistName);
     
     // 检查是否需要直接映射到特定MID
-    const mappedMid = checkSongMapping(processedTrackName, processedArtists, finalTrackName, finalArtistName);
+    const mappedMid = checkSongMapping(finalTrackName, finalArtistName);
     if (mappedMid) {
       console.log(`检测到映射歌曲，直接使用MID: ${mappedMid}`);
       return await handleMappedSong(mappedMid, finalTrackName, finalArtistName, res);
@@ -72,13 +72,10 @@ export default async function handler(req, res) {
       return res.status(404).json({ error: 'Song not found', message: '未找到匹配的歌曲' });
     }
     
-    console.log('找到歌曲:', { name: getSongName(song), artist: extractArtists(song), id: song.id });
+    console.log('找到歌曲:', { name: getSongName(song), artist: extractArtists(song), id: song.id, mid: song.mid });
     
-    // 获取歌词
-    const lyrics = await getLyrics(song.mid || song.id);
-    
-    // 获取逐字歌词
-    const yrcLyrics = await getYrcLyrics(song.id);
+    // 获取歌词 - 使用新的统一API
+    const lyrics = await getLyricsFromNewAPI(song.id, song.mid);
     
     // 返回结果
     const response = {
@@ -89,12 +86,15 @@ export default async function handler(req, res) {
       artistName: extractArtists(song),
       albumName: extractAlbumName(song),
       duration: calculateDuration(song.interval),
-      instrumental: (!lyrics.syncedLyrics || lyrics.syncedLyrics.trim() === '') && 
-                    (!lyrics.translatedLyrics || lyrics.translatedLyrics.trim() === ''),
+      instrumental: !lyrics.has_lrc && !lyrics.has_qrc,
       plainLyrics: '',
-      syncedLyrics: lyrics.syncedLyrics,
-      translatedLyrics: lyrics.translatedLyrics,
-      yrcLyrics: yrcLyrics
+      syncedLyrics: lyrics.lrc || '',
+      translatedLyrics: lyrics.trans || '',
+      yrcLyrics: lyrics.qrc || '',
+      romaLyrics: lyrics.roma || '',
+      has_lrc: lyrics.has_lrc,
+      has_qrc: lyrics.has_qrc,
+      song_info: lyrics.song_info || { name: getSongName(song), singer: extractArtists(song) }
     };
     
     res.status(200).json(response);
@@ -105,38 +105,17 @@ export default async function handler(req, res) {
   }
 }
 
-// 检查歌曲映射
-function checkSongMapping(processedTrackName, processedArtists, originalTrackName, originalArtistName) {
-  // 尝试多种键格式进行匹配
-  const possibleKeys = [
-    `${processedTrackName}_${processedArtists[0]}`,
-    `${originalTrackName}_${originalArtistName}`,
-    `${processedTrackName}_${originalArtistName}`,
-    `${originalTrackName}_${processedArtists[0]}`,
-    // 对于英文歌名，也尝试小写匹配
-    `${processedTrackName.toLowerCase()}_${processedArtists[0]}`,
-    `${originalTrackName.toLowerCase()}_${originalArtistName}`,
-    `${processedTrackName.toLowerCase()}_${originalArtistName}`,
-    `${originalTrackName.toLowerCase()}_${processedArtists[0]}`
-  ];
-  
-  for (const key of possibleKeys) {
-    if (songMapping[key]) {
-      return songMapping[key];
-    }
-  }
-  
-  return null;
+// 检查歌曲映射 - 简化版，只使用原始歌名和艺术家名
+function checkSongMapping(originalTrackName, originalArtistName) {
+  const key = `${originalTrackName}_${originalArtistName}`;
+  return songMapping[key] || null;
 }
 
 // 处理映射歌曲
 async function handleMappedSong(mappedMid, originalTrackName, originalArtistName, res) {
   try {
-    // 直接使用映射的MID获取歌词
-    const lyrics = await getLyrics(mappedMid);
-    
-    // 获取逐字歌词
-    const yrcLyrics = await getYrcLyrics(mappedMid);
+    // 使用新的统一API获取歌词
+    const lyrics = await getLyricsFromNewAPI(null, mappedMid);
     
     // 尝试获取歌曲信息
     let songInfo = null;
@@ -154,15 +133,21 @@ async function handleMappedSong(mappedMid, originalTrackName, originalArtistName
       artistName: songInfo ? extractArtists(songInfo) : originalArtistName,
       albumName: songInfo ? extractAlbumName(songInfo) : '',
       duration: songInfo ? calculateDuration(songInfo.interval) : 0,
-      instrumental: (!lyrics.syncedLyrics || lyrics.syncedLyrics.trim() === '') && 
-                    (!lyrics.translatedLyrics || lyrics.translatedLyrics.trim() === ''),
+      instrumental: !lyrics.has_lrc && !lyrics.has_qrc,
       plainLyrics: '',
-      syncedLyrics: lyrics.syncedLyrics,
-      translatedLyrics: lyrics.translatedLyrics,
-      yrcLyrics: yrcLyrics,
+      syncedLyrics: lyrics.lrc || '',
+      translatedLyrics: lyrics.trans || '',
+      yrcLyrics: lyrics.qrc || '',
+      romaLyrics: lyrics.roma || '',
+      has_lrc: lyrics.has_lrc,
+      has_qrc: lyrics.has_qrc,
       isMapped: true, // 标记这是映射版本
       originalTrackName: originalTrackName,
-      originalArtistName: originalArtistName
+      originalArtistName: originalArtistName,
+      song_info: lyrics.song_info || { 
+        name: songInfo ? getSongName(songInfo) : originalTrackName, 
+        singer: songInfo ? extractArtists(songInfo) : originalArtistName 
+      }
     };
     
     res.status(200).json(response);
@@ -189,6 +174,60 @@ async function getSongInfoByMid(mid) {
     throw new Error('无法获取歌曲信息');
   } catch (error) {
     throw error;
+  }
+}
+
+// 使用新的统一API获取歌词
+async function getLyricsFromNewAPI(id = null, mid = null) {
+  try {
+    let url = 'https://qq-music-decrypt-api.vercel.app/api/lyrics?';
+    
+    if (mid) {
+      url += `mid=${mid}`;
+    } else if (id) {
+      url += `id=${id}`;
+    } else {
+      throw new Error('需要提供id或mid参数');
+    }
+    
+    const response = await axios.get(url, {
+      timeout: 5000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    });
+    
+    const data = response.data;
+    
+    if (data && data.success) {
+      return {
+        id: data.id,
+        mid: data.mid,
+        lrc: data.lyric?.lrc || '',
+        qrc: data.lyric?.qrc || '',
+        trans: data.lyric?.trans || '',
+        roma: data.lyric?.roma || '',
+        has_lrc: data.has_lrc || false,
+        has_qrc: data.has_qrc || false,
+        song_info: data.song_info || null
+      };
+    }
+    
+    throw new Error('API返回失败');
+    
+  } catch (error) {
+    console.error('获取歌词失败:', error.message);
+    return {
+      id: id || '',
+      mid: mid || '',
+      lrc: '',
+      qrc: '',
+      trans: '',
+      roma: '',
+      has_lrc: false,
+      has_qrc: false,
+      song_info: null
+    };
   }
 }
 
@@ -583,305 +622,4 @@ function calculateDuration(interval) {
   }
   
   return 0;
-}
-
-// 使用官方API获取歌词
-async function getLyrics(songMid) {
-  try {
-    const currentMillis = Date.now();
-    const callback = 'MusicJsonCallback_lrc';
-    
-    const params = new URLSearchParams({
-      callback: callback,
-      pcachetime: currentMillis.toString(),
-      songmid: songMid,
-      g_tk: '5381',
-      jsonpCallback: callback,
-      loginUin: '0',
-      hostUin: '0',
-      format: 'jsonp',
-      inCharset: 'utf8',
-      outCharset: 'utf8',
-      notice: '0',
-      platform: 'yqq',
-      needNewCode: '0'
-    });
-    
-    const response = await axios.get(`https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?${params}`, {
-      headers: {
-        'Referer': 'https://c.y.qq.com/'
-      }
-    });
-    
-    let data = response.data;
-    
-    // 处理JSONP响应
-    if (data.startsWith(callback)) {
-      data = data.replace(callback + '(', '').slice(0, -1);
-    }
-    
-    const lyricData = JSON.parse(data);
-    
-    let syncedLyrics = '';
-    let plainLyrics = '';
-    let translatedLyrics = '';
-    
-    if (lyricData.lyric) {
-      // 解码Base64歌词
-      const decodedLyric = Buffer.from(lyricData.lyric, 'base64').toString('utf-8');
-      syncedLyrics = filterLyricsWithNewRules(decodedLyric);
-      plainLyrics = '';
-    }
-    
-    if (lyricData.trans) {
-      // 解码Base64翻译歌词
-      const decodedTrans = Buffer.from(lyricData.trans, 'base64').toString('utf-8');
-      translatedLyrics = filterLyricsWithNewRules(decodedTrans);
-    }
-    
-    return { syncedLyrics, plainLyrics, translatedLyrics };
-    
-  } catch (error) {
-    console.error('获取歌词失败:', error);
-    return { 
-      syncedLyrics: '', 
-      plainLyrics: '', 
-      translatedLyrics: ''
-    };
-  }
-}
-
-// 获取逐字歌词
-async function getYrcLyrics(musicId) {
-  try {
-    const response = await axios.get(`https://qq-music-decrypt-api.vercel.app/api/lyrics?musicid=${musicId}`, {
-      timeout: 5000, // 5秒超时
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
-    });
-    
-    if (response.data && response.data.success && response.data.lyrics) {
-      return response.data.lyrics;
-    }
-    
-    return '';
-  } catch (error) {
-    console.error('获取逐字歌词失败:', error.message);
-    return '';
-  }
-}
-
-// 使用新的过滤规则处理歌词
-function filterLyricsWithNewRules(lyricContent) {
-  if (!lyricContent) return '';
-  
-  // 1) 将歌词按行分割，处理 Windows 换行符 \r\n
-  const lines = lyricContent.replace(/\r\n/g, '\n').split('\n');
-  
-  // 首先移除所有的标签行（[ti:], [ar:], [al:], [by:], [offset:] 等）
-  const filteredLines = lines.filter(line => {
-    const trimmed = line.trim();
-    // 移除所有标签行，但保留有时间轴的歌词行
-    return !(/^\[(ti|ar|al|by|offset|t_time|kana|lang|total):.*\]$/i.test(trimmed));
-  });
-  
-  // 解析每行，提取时间戳和文本内容
-  const parsedLines = [];
-  for (const line of filteredLines) {
-    const match = line.match(/^(\[[0-9:.]+\])(.*)$/);
-    if (match) {
-      parsedLines.push({
-        raw: line,
-        timestamp: match[1],
-        text: match[2].trim(),
-        plainText: match[2].trim().replace(/\[.*?\]/g, '') // 移除内嵌标签的纯文本
-      });
-    }
-  }
-  
-  // 2) 基础序列 - 按时间戳排序
-  let filtered = [...parsedLines];
-  
-  // 收集"被删除的冒号行"的纯文本
-  let removedColonPlainTexts = [];
-  
-  // 2) A) 标题行（仅前三行内；含 '-' 就删）
-  let i = 0;
-  let scanLimit = Math.min(3, filtered.length);
-  while (i < scanLimit) {
-    const text = filtered[i].plainText;
-    if (text.includes('-')) {
-      filtered.splice(i, 1);
-      scanLimit = Math.min(3, filtered.length);
-      continue;
-    } else {
-      i += 1;
-    }
-  }
-  
-  // 2.5) A2) 前三行内：含冒号的行直接删除
-  let removedA2Colon = false;
-  i = 0;
-  scanLimit = Math.min(3, filtered.length);
-  while (i < scanLimit) {
-    const text = filtered[i].plainText;
-    if (containsColon(text)) {
-      removedColonPlainTexts.push(text);
-      filtered.splice(i, 1);
-      removedA2Colon = true;
-      scanLimit = Math.min(3, filtered.length);
-      continue;
-    } else {
-      i += 1;
-    }
-  }
-  
-  // 3) B0) 处理"开头连续冒号行"
-  let leading = 0;
-  while (leading < filtered.length) {
-    const text = filtered[leading].plainText;
-    if (containsColon(text)) {
-      leading += 1;
-    } else {
-      break;
-    }
-  }
-  
-  if (removedA2Colon) {
-    if (leading >= 1) {
-      for (let idx = 0; idx < leading; idx++) {
-        removedColonPlainTexts.push(filtered[idx].plainText);
-      }
-      filtered.splice(0, leading);
-    }
-  } else {
-    if (leading >= 2) {
-      for (let idx = 0; idx < leading; idx++) {
-        removedColonPlainTexts.push(filtered[idx].plainText);
-      }
-      filtered.splice(0, leading);
-    }
-  }
-  
-  // 3) 制作行（全局）：删除任意位置出现的"连续 ≥2 行均含冒号"的区间
-  let newFiltered = [];
-  i = 0;
-  while (i < filtered.length) {
-    const text = filtered[i].plainText;
-    if (containsColon(text)) {
-      // 统计这一段连续"含冒号"的长度
-      let j = i;
-      while (j < filtered.length) {
-        const tj = filtered[j].plainText;
-        if (containsColon(tj)) {
-          j += 1;
-        } else {
-          break;
-        }
-      }
-      const runLen = j - i;
-      if (runLen >= 2) {
-        // 收集整段 i..<(i+runLen) 的纯文本后丢弃
-        for (let k = i; k < j; k++) {
-          removedColonPlainTexts.push(filtered[k].plainText);
-        }
-        i = j;
-      } else {
-        // 仅 1 行，保留
-        newFiltered.push(filtered[i]);
-        i = j;
-      }
-    } else {
-      newFiltered.push(filtered[i]);
-      i += 1;
-    }
-  }
-  filtered = newFiltered;
-  
-  // 4) C) 全局删除：凡包含【】或 [] 的行一律删除
-  filtered = filtered.filter(line => !containsBracketTag(line.plainText));
-  
-  // 4.5) C2) 处理开头两行的"圆括号标签"
-  i = 0;
-  scanLimit = Math.min(2, filtered.length);
-  while (i < scanLimit) {
-    const text = filtered[i].plainText;
-    if (containsParenPair(text)) {
-      filtered.splice(i, 1);
-      scanLimit = Math.min(2, filtered.length);
-      continue;
-    } else {
-      i += 1;
-    }
-  }
-  
-  // 4.75) D) 全局删除：版权/授权/禁止类提示语
-  filtered = filtered.filter(line => !isLicenseWarningLine(line.plainText));
-  
-  // 5) 额外的清理步骤：移除空时间轴行和只有"//"的行
-  filtered = filtered.filter(line => {
-    const text = line.plainText;
-    
-    // 移除空行
-    if (text === '') return false;
-    
-    // 移除只包含"//"的行
-    if (text === '//') return false;
-    
-    // 移除只包含时间轴后面只有"//"的行（如 [00:36.66]//）
-    if (/^\/\/\s*$/.test(text) || /^\[\d+:\d+(\.\d+)?\]\s*\/\/\s*$/.test(line.raw)) {
-      return false;
-    }
-    
-    // 移除只有时间轴的空行（如 [00:23.53]）
-    if (/^\[\d+:\d+(\.\d+)?\]\s*$/.test(line.raw)) {
-      return false;
-    }
-    
-    return true;
-  });
-  
-  // 重新组合成LRC格式
-  const result = filtered.map(line => line.raw).join('\n');
-  
-  return result;
-}
-
-// 辅助函数 - 检查是否包含冒号（中英文冒号）
-function containsColon(text) {
-  return text.includes(':') || text.includes('：');
-}
-
-// 辅助函数 - 检查是否包含括号标签
-function containsBracketTag(text) {
-  const hasHalfPair = text.includes('[') && text.includes(']');
-  const hasFullPair = text.includes('【') && text.includes('】');
-  return hasHalfPair || hasFullPair;
-}
-
-// 辅助函数 - 检查是否包含圆括号对
-function containsParenPair(text) {
-  const hasHalfPair = text.includes('(') && text.includes(')');
-  const hasFullPair = text.includes('（') && text.includes('）');
-  return hasHalfPair || hasFullPair;
-}
-
-// 辅助函数 - 检查是否是版权警告行
-function isLicenseWarningLine(text) {
-  if (!text) return false;
-  
-  // 特殊关键词 - 只要包含这些词就直接认为是版权行
-  const specialKeywords = ['文曲大模型', '享有本翻译作品的著作权'];
-  for (const keyword of specialKeywords) {
-    if (text.includes(keyword)) return true;
-  }
-  
-  // 普通关键词 - 需要命中多个才认为是版权行
-  const tokens = ['未经', '许可', '授权', '不得', '请勿', '使用', '版权', '翻唱'];
-  let count = 0;
-  for (const token of tokens) {
-    if (text.includes(token)) count += 1;
-  }
-  return count >= 3; // 降低阈值到3
 }
